@@ -69,12 +69,15 @@ const TICKET_PANEL = config.ticketPanel || {
 };
 
 const ticketOptions = config.ticketOptions || [];
-const purchaseCatalog = config.purchaseCatalog || [];
 const paymentMethods = (config.paymentMethods || []).filter(
   (method) => method.value !== "qr"
 );
 const cryptoWallets = config.cryptoWallets || {};
 const paypalConfig = config.paypal || {};
+const fallbackPurchaseCatalog = config.purchaseCatalog || [];
+
+const STOCK_CHANNEL_ID = config.stockSource?.channelId || "1484837636635099146";
+const STOCK_MESSAGE_ID = config.stockSource?.messageId || "1485263280120397925";
 
 const purchaseStates = new Map();
 
@@ -91,7 +94,16 @@ function normalizeName(str) {
     .toLowerCase()
     .replace(/\s+/g, "-")
     .replace(/[^a-z0-9-_]/g, "")
-    .slice(0, 20);
+    .slice(0, 30);
+}
+
+function normalizeKey(str) {
+  return str
+    .toLowerCase()
+    .replace(/[`>*+_]/g, "")
+    .replace(/[^\w\s-]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function getTicketOption(value) {
@@ -111,10 +123,6 @@ function formatEuro(value) {
   return `€${Number(value).toFixed(2)}`;
 }
 
-function getCatalogItem(value) {
-  return purchaseCatalog.find((item) => item.value === value);
-}
-
 function getPaymentMethod(value) {
   return paymentMethods.find((method) => method.value === value);
 }
@@ -131,7 +139,8 @@ function getPurchaseState(channelId) {
       cryptoQuotes: {},
       unlocked: false,
       verifiedTxid: null,
-      paypalScreenshotUrl: null
+      paypalScreenshotUrl: null,
+      stockItems: []
     });
   }
 
@@ -145,6 +154,191 @@ function isValidImageUrl(url) {
     url.includes("media.discordapp.net") ||
     url.includes("i.imgur.com")
   );
+}
+
+function labelToValue(label) {
+  return `item_${normalizeName(label)}`;
+}
+
+function mapStockNameToLabel(rawName) {
+  const name = normalizeKey(rawName);
+
+  const mappings = [
+    {
+      keys: ["premium fivem readys", "premium fivem ready", "premium fivem"],
+      label: "Fivem Premium Accounts"
+    },
+    {
+      keys: ["standard fivem ready", "standard fivem readys", "standard fivem"],
+      label: "Fivem Standard Accounts"
+    },
+    {
+      keys: ["fresh steam accounts", "steam fresh accounts"],
+      label: "Steam Fresh Accounts"
+    },
+    {
+      keys: ["fresh mail accounts", "fresh emails", "fresh email accounts"],
+      label: "Fresh Emails"
+    },
+    {
+      keys: ["mullvad account lifetime", "mullvad account"],
+      label: "Mullvad Account Lifetime"
+    },
+    {
+      keys: ["checked accounts"],
+      label: "Discord Checked Accounts"
+    },
+    {
+      keys: ["non checked accounts", "non checked account"],
+      label: "Discord Non Checked Accounts"
+    }
+  ];
+
+  const found = mappings.find((entry) =>
+    entry.keys.some((key) => name.includes(key))
+  );
+
+  return found ? found.label : rawName.trim();
+}
+
+function getEmojiForLabel(label) {
+  const text = normalizeKey(label);
+
+  if (text.includes("premium")) return "🔥";
+  if (text.includes("standard")) return "🎮";
+  if (text.includes("steam")) return "💨";
+  if (text.includes("email") || text.includes("mail")) return "📧";
+  if (text.includes("mullvad")) return "🔐";
+  if (text.includes("discord")) return "💬";
+
+  return "🛒";
+}
+
+function parsePrice(priceText) {
+  if (!priceText) return 0;
+  const cleaned = priceText.replace(",", ".").replace(/[^\d.]/g, "");
+  const value = Number(cleaned);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function parseStockMessageText(text) {
+  if (!text) return [];
+
+  const lines = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const items = [];
+
+  for (const line of lines) {
+    if (!line.includes("[") || !line.includes("]")) continue;
+
+    const outMatch = line.match(/^[xX]\s+(.+?)\s*-\s*OUT\s*\[([0-9.,]+)€?\]/i);
+    if (outMatch) {
+      const rawName = outMatch[1].trim();
+      const price = parsePrice(outMatch[2]);
+
+      items.push({
+        label: mapStockNameToLabel(rawName),
+        value: labelToValue(mapStockNameToLabel(rawName)),
+        emoji: getEmojiForLabel(rawName),
+        description: "Currently out of stock",
+        price,
+        stock: 0,
+        inStock: false
+      });
+
+      continue;
+    }
+
+    const pcsMatch = line.match(/^[›>xX+\-]?\s*(.+?)\s*[:\-]\s*(\d+)\s*pcs\s*\[([0-9.,]+)€?\]/i);
+    if (pcsMatch) {
+      const rawName = pcsMatch[1].trim();
+      const stock = Number(pcsMatch[2]);
+      const price = parsePrice(pcsMatch[3]);
+
+      items.push({
+        label: mapStockNameToLabel(rawName),
+        value: labelToValue(mapStockNameToLabel(rawName)),
+        emoji: getEmojiForLabel(rawName),
+        description: `Live stock: ${stock}`,
+        price,
+        stock,
+        inStock: stock > 0
+      });
+
+      continue;
+    }
+  }
+
+  const deduped = new Map();
+  for (const item of items) {
+    deduped.set(item.label, item);
+  }
+
+  return [...deduped.values()];
+}
+
+function buildFallbackCatalog() {
+  return fallbackPurchaseCatalog.map((item) => ({
+    ...item,
+    stock: 999999,
+    inStock: true
+  }));
+}
+
+async function fetchLiveStockCatalog(guild) {
+  try {
+    const channel = await guild.channels.fetch(STOCK_CHANNEL_ID);
+    if (!channel || !channel.isTextBased()) {
+      throw new Error("Stock channel not found or is not text based.");
+    }
+
+    const message = await channel.messages.fetch(STOCK_MESSAGE_ID);
+    if (!message) {
+      throw new Error("Stock message not found.");
+    }
+
+    const parts = [];
+
+    if (message.content) parts.push(message.content);
+
+    for (const embed of message.embeds) {
+      if (embed.title) parts.push(embed.title);
+      if (embed.description) parts.push(embed.description);
+
+      if (Array.isArray(embed.fields)) {
+        for (const field of embed.fields) {
+          if (field.name) parts.push(field.name);
+          if (field.value) parts.push(field.value);
+        }
+      }
+    }
+
+    const parsed = parseStockMessageText(parts.join("\n"));
+    if (!parsed.length) {
+      console.warn("Stock parse returned 0 items, using fallback catalog.");
+      return buildFallbackCatalog();
+    }
+
+    return parsed;
+  } catch (error) {
+    console.error("Failed to fetch live stock catalog:", error);
+    return buildFallbackCatalog();
+  }
+}
+
+async function refreshPurchaseStock(channel) {
+  const state = getPurchaseState(channel.id);
+  const stockItems = await fetchLiveStockCatalog(channel.guild);
+  state.stockItems = stockItems;
+  return stockItems;
+}
+
+function getLiveCatalogItem(channelId, value) {
+  const state = getPurchaseState(channelId);
+  return (state.stockItems || []).find((item) => item.value === value);
 }
 
 async function getCryptoQuote(coinId, totalEur) {
@@ -271,10 +465,11 @@ function buildTicketSelectRow() {
   return new ActionRowBuilder().addComponents(menu);
 }
 
-function buildPurchaseFlowEmbed(user) {
-  const productLines = purchaseCatalog.map(
-    (item, index) => `**${index + 1}. ${item.label}** — ${formatEuro(item.price)}`
-  );
+function buildPurchaseFlowEmbed(user, stockItems) {
+  const productLines = stockItems.map((item, index) => {
+    const status = item.inStock ? `Stock: ${item.stock}` : "OUT OF STOCK";
+    return `**${index + 1}. ${item.label}** — ${formatEuro(item.price)} — **${status}**`;
+  });
 
   return new EmbedBuilder()
     .setColor(BRAND_COLOR)
@@ -293,7 +488,7 @@ function buildPurchaseFlowEmbed(user) {
       "5. Submit the required payment proof to unlock the channel"
     ].join("\n"))
     .setThumbnail(LOGO_URL || null)
-    .setFooter({ text: "Niro Market Purchase System", iconURL: LOGO_URL || undefined })
+    .setFooter({ text: "Niro Market Purchase System • Live stock loaded", iconURL: LOGO_URL || undefined })
     .setTimestamp();
 }
 
@@ -309,6 +504,7 @@ function buildPurchaseSummaryEmbed(user, state) {
   const lines = [
     `**Customer:** ${user}`,
     `**Product:** ${state.product ? `${state.product.label} — ${formatEuro(state.product.price)}` : "Not selected"}`,
+    `**Available Stock:** ${state.product ? state.product.stock : "Not selected"}`,
     `**Quantity:** ${state.quantity ?? "Not selected"}`,
     `**Total:** ${state.total != null ? formatEuro(state.total) : "Not calculated"}`,
     `**Payment Method:** ${state.paymentMethod ? state.paymentMethod.label : "Not selected"}`,
@@ -319,14 +515,16 @@ function buildPurchaseSummaryEmbed(user, state) {
   return embed;
 }
 
-function buildPurchaseRows() {
+function buildPurchaseRows(stockItems) {
+  const availableItems = stockItems.length ? stockItems : buildFallbackCatalog();
+
   const productMenu = new StringSelectMenuBuilder()
     .setCustomId("purchase_product")
     .setPlaceholder("Select what you want to buy")
     .addOptions(
-      purchaseCatalog.map((item) => ({
-        label: item.label,
-        description: `${formatEuro(item.price)}${item.description ? ` • ${item.description}` : ""}`.slice(0, 100),
+      availableItems.slice(0, 25).map((item) => ({
+        label: item.label.slice(0, 100),
+        description: `${formatEuro(item.price)} • Stock: ${item.stock}`.slice(0, 100),
         value: item.value,
         emoji: item.emoji || undefined
       }))
@@ -362,8 +560,10 @@ function buildPurchaseRows() {
 }
 
 async function sendPurchaseFlow(channel, user) {
+  const stockItems = await refreshPurchaseStock(channel);
   const state = getPurchaseState(channel.id);
-  const introEmbed = buildPurchaseFlowEmbed(user);
+
+  const introEmbed = buildPurchaseFlowEmbed(user, stockItems);
   const summaryEmbed = buildPurchaseSummaryEmbed(user, state);
 
   const lockedEmbed = new EmbedBuilder()
@@ -385,16 +585,26 @@ async function sendPurchaseFlow(channel, user) {
 
   await channel.send({
     embeds: [introEmbed, summaryEmbed, lockedEmbed],
-    components: buildPurchaseRows()
+    components: buildPurchaseRows(stockItems)
   });
 }
 
 async function handlePurchaseProduct(interaction) {
   const state = getPurchaseState(interaction.channelId);
-  const product = getCatalogItem(interaction.values[0]);
+  await refreshPurchaseStock(interaction.channel);
+
+  const product = getLiveCatalogItem(interaction.channelId, interaction.values[0]);
 
   if (!product) {
     await interaction.reply({ content: "Invalid product selected.", ephemeral: true });
+    return;
+  }
+
+  if (!product.inStock || product.stock <= 0) {
+    await interaction.reply({
+      content: `**${product.label}** is currently out of stock.`,
+      ephemeral: true
+    });
     return;
   }
 
@@ -402,11 +612,20 @@ async function handlePurchaseProduct(interaction) {
   state.submitted = false;
 
   if (state.quantity) {
+    if (state.quantity > product.stock) {
+      state.total = null;
+      await interaction.reply({
+        content: `You selected **${product.label}**, but only **${product.stock}** item(s) are available. Please enter a lower quantity.`,
+        ephemeral: true
+      });
+      return;
+    }
+
     state.total = product.price * state.quantity;
   }
 
   await interaction.reply({
-    content: `Selected product: **${product.label}** for **${formatEuro(product.price)}**.`,
+    content: `Selected product: **${product.label}** for **${formatEuro(product.price)}**.\nCurrent stock: **${product.stock}**`,
     ephemeral: true
   });
 }
@@ -442,12 +661,34 @@ async function handlePurchaseQuantityModal(interaction) {
     return;
   }
 
-  state.quantity = quantity;
-  state.submitted = false;
+  await refreshPurchaseStock(interaction.channel);
 
   if (state.product) {
-    state.total = state.product.price * quantity;
+    const freshProduct = getLiveCatalogItem(interaction.channelId, state.product.value);
+
+    if (!freshProduct || !freshProduct.inStock) {
+      await interaction.reply({
+        content: "This item is now out of stock. Please select another item.",
+        ephemeral: true
+      });
+      return;
+    }
+
+    state.product = freshProduct;
+
+    if (quantity > freshProduct.stock) {
+      await interaction.reply({
+        content: `We do not have that much stock.\nAvailable stock for **${freshProduct.label}**: **${freshProduct.stock}**`,
+        ephemeral: true
+      });
+      return;
+    }
+
+    state.total = freshProduct.price * quantity;
   }
+
+  state.quantity = quantity;
+  state.submitted = false;
 
   await interaction.reply({
     content: `Selected quantity: **${quantity}x**.`,
@@ -464,11 +705,37 @@ async function handlePurchasePayment(interaction) {
     return;
   }
 
-  if (
-    paymentMethod.value === "paypal" &&
-    state.total != null &&
-    Number(state.total) < 1
-  ) {
+  if (!state.product || !state.quantity) {
+    await interaction.reply({
+      content: "Please select the product and quantity first.",
+      ephemeral: true
+    });
+    return;
+  }
+
+  await refreshPurchaseStock(interaction.channel);
+  const freshProduct = getLiveCatalogItem(interaction.channelId, state.product.value);
+
+  if (!freshProduct || !freshProduct.inStock) {
+    await interaction.reply({
+      content: "This item is now out of stock. Please select another item.",
+      ephemeral: true
+    });
+    return;
+  }
+
+  if (state.quantity > freshProduct.stock) {
+    await interaction.reply({
+      content: `We do not have that much stock.\nAvailable stock for **${freshProduct.label}**: **${freshProduct.stock}**`,
+      ephemeral: true
+    });
+    return;
+  }
+
+  state.product = freshProduct;
+  state.total = freshProduct.price * state.quantity;
+
+  if (paymentMethod.value === "paypal" && Number(state.total) < 1) {
     await interaction.reply({
       content: "PayPal is only available for orders of at least **€1.00**.",
       ephemeral: true
@@ -478,14 +745,6 @@ async function handlePurchasePayment(interaction) {
 
   state.paymentMethod = paymentMethod;
   state.submitted = false;
-
-  if (!state.product || !state.quantity || state.total == null) {
-    await interaction.reply({
-      content: "Please select the product and quantity first.",
-      ephemeral: true
-    });
-    return;
-  }
 
   await interaction.reply({
     content: `Payment method selected: **${paymentMethod.label}**.`,
@@ -504,7 +763,28 @@ async function handlePurchaseDone(interaction) {
     return;
   }
 
-  state.total = state.product.price * state.quantity;
+  await refreshPurchaseStock(interaction.channel);
+
+  const freshProduct = getLiveCatalogItem(interaction.channelId, state.product.value);
+
+  if (!freshProduct || !freshProduct.inStock) {
+    await interaction.reply({
+      content: "This item is now out of stock. Please select another item.",
+      ephemeral: true
+    });
+    return;
+  }
+
+  if (state.quantity > freshProduct.stock) {
+    await interaction.reply({
+      content: `We do not have that much stock.\nAvailable stock for **${freshProduct.label}**: **${freshProduct.stock}**`,
+      ephemeral: true
+    });
+    return;
+  }
+
+  state.product = freshProduct;
+  state.total = freshProduct.price * state.quantity;
   state.submitted = true;
   state.txAttempts = 0;
   state.cryptoQuotes = {};
@@ -546,13 +826,6 @@ async function handlePurchaseDone(interaction) {
         ].filter(Boolean).join("\n"));
       } catch (error) {
         console.error(`Failed to fetch crypto quote for ${coinKey}:`, error);
-        walletLines.push([
-          `**${wallet.symbol}:**`,
-          `EUR total: **${formatEuro(state.total)}**`,
-          `${wallet.symbol} total: **Unable to calculate right now**`,
-          `Wallet: \`${wallet.address}\``,
-          wallet.network ? `Network: ${wallet.network}` : null
-        ].filter(Boolean).join("\n"));
       }
     }
 
@@ -585,7 +858,19 @@ async function handlePurchaseDone(interaction) {
       `**PayPal email:** ${paypalConfig.email || "NOT_SET"}`,
       `**Amount:** ${formatEuro(state.total)}`,
       "",
-      "**After sending the payment, press the button below and submit your screenshot link.**"
+      "**After sending the payment, press the button below and submit your screenshot link.**",
+      "",
+      "**Accepted screenshot links:**",
+      "- Direct image links ending in .png, .jpg, .jpeg, .webp, or .gif",
+      "- Discord CDN links",
+      "- Imgur direct image links",
+      "",
+      "**Examples:**",
+      "- https://cdn.discordapp.com/attachments/.../proof.png",
+      "- https://media.discordapp.net/attachments/.../proof.jpg",
+      "- https://i.imgur.com/example.png",
+      "",
+      "**Not accepted:** album links, page links, PayPal activity page links, or non-image links"
     ].join("\n"));
 
     const screenshotButton = new ButtonBuilder()
@@ -656,10 +941,7 @@ async function showScreenshotModal(interaction) {
     .setRequired(true)
     .setPlaceholder("https://...");
 
-  modal.addComponents(
-    new ActionRowBuilder().addComponents(screenshotInput)
-  );
-
+  modal.addComponents(new ActionRowBuilder().addComponents(screenshotInput));
   await interaction.showModal(modal);
 }
 
@@ -1143,35 +1425,7 @@ client.on("interactionCreate", async (interaction) => {
   }
 });
 
-// -------------------- DISCORD API TEST + LOGIN --------------------
-async function testDiscordApi() {
-  try {
-    const meRes = await fetch("https://discord.com/api/v10/users/@me", {
-      headers: {
-        Authorization: `Bot ${TOKEN}`
-      }
-    });
-
-    console.log("REST /users/@me status:", meRes.status);
-
-    const meText = await meRes.text();
-    console.log("REST /users/@me body:", meText.slice(0, 300));
-
-    const gwRes = await fetch("https://discord.com/api/v10/gateway/bot", {
-      headers: {
-        Authorization: `Bot ${TOKEN}`
-      }
-    });
-
-    console.log("REST /gateway/bot status:", gwRes.status);
-
-    const gwText = await gwRes.text();
-    console.log("REST /gateway/bot body:", gwText.slice(0, 300));
-  } catch (err) {
-    console.error("Discord REST preflight failed:", err);
-  }
-}
-
+// -------------------- LOGIN --------------------
 (async () => {
   try {
     console.log("Starting Discord login...");
@@ -1179,8 +1433,6 @@ async function testDiscordApi() {
     console.log("TOKEN length:", TOKEN.length);
     console.log("CLIENT_ID:", CLIENT_ID || "missing");
     console.log("GUILD_ID:", GUILD_ID || "missing");
-
-    await testDiscordApi();
 
     await client.login(TOKEN);
     console.log("client.login() resolved successfully.");
