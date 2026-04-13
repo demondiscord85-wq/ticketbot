@@ -231,7 +231,7 @@ async function sendTranscriptToUserDM(ownerUser, transcriptAttachment) {
       .setAuthor({ name: "Niro Market", iconURL: LOGO_URL || undefined })
       .setTitle("Your Ticket Transcript")
       .setDescription(
-        "We hope that you found what you were looking for. Here is your transcript if you ever need it."
+        "TO SEE THE TRANSCRIPT DOWNLOAD IT AND OPEN IT. We hope that you found what you were looking for. Here is your transcript if you ever need it."
       )
       .setFooter({
         text: "Niro Market Support",
