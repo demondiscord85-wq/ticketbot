@@ -1,8 +1,6 @@
 require("dotenv").config();
 
 const express = require("express");
-const fetch = (...args) => import("node-fetch").then(({ default: fetch }) => fetch(...args));
-
 const {
   Client,
   GatewayIntentBits,
@@ -57,11 +55,7 @@ app.listen(PORT, () => {
 
 // -------------------- DISCORD CLIENT --------------------
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
-  ]
+  intents: [GatewayIntentBits.Guilds]
 });
 
 // -------------------- CONFIG --------------------
@@ -91,6 +85,7 @@ const commands = [
     .toJSON()
 ];
 
+// -------------------- HELPERS --------------------
 function normalizeName(str) {
   return str
     .toLowerCase()
@@ -135,28 +130,21 @@ function getPurchaseState(channelId) {
       txAttempts: 0,
       cryptoQuotes: {},
       unlocked: false,
-      verifiedTxid: null
+      verifiedTxid: null,
+      paypalScreenshotUrl: null
     });
   }
 
   return purchaseStates.get(channelId);
 }
 
-function isImageAttachment(attachment) {
-  if (!attachment) return false;
-
-  const contentType = attachment.contentType || "";
-  if (contentType.startsWith("image/")) return true;
-
-  const name = (attachment.name || "").toLowerCase();
-  return [".png", ".jpg", ".jpeg", ".webp", ".gif"].some((ext) =>
-    name.endsWith(ext)
+function isValidImageUrl(url) {
+  return (
+    /^https?:\/\/.+\.(png|jpg|jpeg|webp|gif)(\?.*)?$/i.test(url) ||
+    url.includes("cdn.discordapp.com") ||
+    url.includes("media.discordapp.net") ||
+    url.includes("i.imgur.com")
   );
-}
-
-function getTicketOwnerIdFromTopic(topic = "") {
-  const match = topic.match(/ticket-owner:(\d+)/);
-  return match ? match[1] : null;
 }
 
 async function getCryptoQuote(coinId, totalEur) {
@@ -206,7 +194,12 @@ async function getCryptoQuote(coinId, totalEur) {
   }
 }
 
-async function verifyCryptoTransaction({ coinKey, txid, expectedWallet, expectedAmount }) {
+async function verifyCryptoTransaction({
+  coinKey,
+  txid,
+  expectedWallet,
+  expectedAmount
+}) {
   const chainMap = {
     btc: "btc",
     ltc: "ltc"
@@ -297,7 +290,7 @@ function buildPurchaseFlowEmbed(user) {
       "2. Enter quantity",
       "3. Choose payment method",
       "4. Press Done",
-      "5. Complete the required payment verification to unlock the channel"
+      "5. Submit the required payment proof to unlock the channel"
     ].join("\n"))
     .setThumbnail(LOGO_URL || null)
     .setFooter({ text: "Niro Market Purchase System", iconURL: LOGO_URL || undefined })
@@ -381,7 +374,7 @@ async function sendPurchaseFlow(channel, user) {
       "**This purchase ticket is locked.**",
       "",
       "Crypto payments require a valid **BTC** or **LTC** TXID.",
-      "PayPal payments require a **payment screenshot**.",
+      "PayPal payments require a valid **payment screenshot link**.",
       "Something Else unlocks the channel automatically.",
       "",
       "The channel will unlock only after the required payment proof is verified."
@@ -592,9 +585,15 @@ async function handlePurchaseDone(interaction) {
       `**PayPal email:** ${paypalConfig.email || "NOT_SET"}`,
       `**Amount:** ${formatEuro(state.total)}`,
       "",
-      "**After sending the payment, upload a screenshot/photo of the transaction in this ticket.**",
-      "**The channel will unlock automatically after a valid payment screenshot is sent.**"
+      "**After sending the payment, press the button below and submit your screenshot link.**"
     ].join("\n"));
+
+    const screenshotButton = new ButtonBuilder()
+      .setCustomId("purchase_submit_screenshot")
+      .setLabel("Submit Screenshot")
+      .setStyle(ButtonStyle.Success);
+
+    extraRows.push(new ActionRowBuilder().addComponents(screenshotButton));
   } else if (state.paymentMethod.value === "something_else") {
     detailsEmbed.setDescription([
       "**You selected Something Else.**",
@@ -645,6 +644,25 @@ async function showTxidModal(interaction) {
   await interaction.showModal(modal);
 }
 
+async function showScreenshotModal(interaction) {
+  const modal = new ModalBuilder()
+    .setCustomId("purchase_screenshot_modal")
+    .setTitle("Submit Payment Screenshot");
+
+  const screenshotInput = new TextInputBuilder()
+    .setCustomId("purchase_screenshot_input")
+    .setLabel("Paste your screenshot image URL")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setPlaceholder("https://...");
+
+  modal.addComponents(
+    new ActionRowBuilder().addComponents(screenshotInput)
+  );
+
+  await interaction.showModal(modal);
+}
+
 async function unlockPurchaseChannel(interaction, txid) {
   const state = getPurchaseState(interaction.channelId);
 
@@ -677,31 +695,33 @@ async function unlockPurchaseChannel(interaction, txid) {
   await unlockMessage.pin().catch(() => {});
 }
 
-async function unlockPaypalChannel(message) {
-  const state = getPurchaseState(message.channel.id);
+async function unlockPaypalChannelFromLink(interaction, imageUrl) {
+  const state = getPurchaseState(interaction.channelId);
 
-  await message.channel.permissionOverwrites.edit(message.author.id, {
+  await interaction.channel.permissionOverwrites.edit(interaction.user.id, {
     ViewChannel: true,
     SendMessages: true,
     ReadMessageHistory: true
   });
 
   state.unlocked = true;
+  state.paypalScreenshotUrl = imageUrl;
 
   const unlockedEmbed = new EmbedBuilder()
     .setColor(BRAND_COLOR)
     .setAuthor({ name: "Niro Market", iconURL: LOGO_URL || undefined })
     .setTitle("🔓 CHANNEL UNLOCKED")
     .setDescription([
-      `**${message.author.tag}** provided PayPal payment proof.`,
+      `**${interaction.user.tag}** submitted PayPal payment proof.`,
       "",
-      "**Payment screenshot received and pinned successfully.**"
+      "**The payment screenshot has been received and pinned successfully.**"
     ].join("\n"))
+    .setImage(imageUrl)
     .setThumbnail(LOGO_URL || null)
     .setFooter({ text: "Niro Market Payment Verification", iconURL: LOGO_URL || undefined })
     .setTimestamp();
 
-  const unlockMessage = await message.channel.send({
+  const unlockMessage = await interaction.channel.send({
     embeds: [unlockedEmbed]
   });
 
@@ -831,6 +851,52 @@ async function handleTxidModal(interaction) {
   await interaction.reply({
     content: `❌ Payment could not be verified. You have **${attemptsLeft}** attempt${attemptsLeft === 1 ? "" : "s"} left.`,
     ephemeral: true
+  });
+}
+
+async function handleScreenshotModal(interaction) {
+  const state = getPurchaseState(interaction.channelId);
+
+  if (!state.submitted || !state.paymentMethod || state.paymentMethod.value !== "paypal") {
+    await interaction.reply({
+      content: "You need to complete the PayPal order first and press Done.",
+      ephemeral: true
+    });
+    return;
+  }
+
+  if (state.total == null || state.total < 1) {
+    await interaction.reply({
+      content: "PayPal is only available for orders of at least **€1.00**.",
+      ephemeral: true
+    });
+    return;
+  }
+
+  const imageUrl = interaction.fields.getTextInputValue("purchase_screenshot_input").trim();
+
+  if (!isValidImageUrl(imageUrl)) {
+    await interaction.reply({
+      content: "Please submit a valid image URL.",
+      ephemeral: true
+    });
+    return;
+  }
+
+  await interaction.reply({
+    content: "✅ PayPal screenshot received. The channel has been unlocked.",
+    ephemeral: true
+  });
+
+  await unlockPaypalChannelFromLink(interaction, imageUrl);
+
+  const tagText =
+    SUPPORT_ROLE_ID && /^\d+$/.test(SUPPORT_ROLE_ID)
+      ? `<@&${SUPPORT_ROLE_ID}>`
+      : "@owners";
+
+  await interaction.channel.send({
+    content: `✅ PayPal proof submitted successfully. ${tagText}`
   });
 }
 
@@ -1019,6 +1085,11 @@ client.on("interactionCreate", async (interaction) => {
         return;
       }
 
+      if (interaction.customId === "purchase_submit_screenshot") {
+        await showScreenshotModal(interaction);
+        return;
+      }
+
       if (interaction.customId === "close_ticket") {
         await interaction.reply({
           content: "This ticket will close in 5 seconds.",
@@ -1049,6 +1120,11 @@ client.on("interactionCreate", async (interaction) => {
         await handleTxidModal(interaction);
         return;
       }
+
+      if (interaction.customId === "purchase_screenshot_modal") {
+        await handleScreenshotModal(interaction);
+        return;
+      }
     }
   } catch (error) {
     console.error("Interaction error:", error);
@@ -1064,50 +1140,6 @@ client.on("interactionCreate", async (interaction) => {
         ephemeral: true
       }).catch(() => {});
     }
-  }
-});
-
-// -------------------- PAYPAL IMAGE PROOF HANDLER --------------------
-client.on("messageCreate", async (message) => {
-  try {
-    if (message.author.bot) return;
-    if (!message.guild) return;
-
-    const channel = message.channel;
-    if (!channel?.topic) return;
-    if (!channel.topic.includes("ticket-owner:")) return;
-    if (!channel.topic.includes("ticket-type:purchase")) return;
-
-    const state = getPurchaseState(channel.id);
-    if (!state) return;
-    if (state.unlocked) return;
-    if (!state.submitted) return;
-    if (!state.paymentMethod || state.paymentMethod.value !== "paypal") return;
-    if (state.total == null || state.total < 1) return;
-
-    const ticketOwnerId = getTicketOwnerIdFromTopic(channel.topic);
-    if (!ticketOwnerId || message.author.id !== ticketOwnerId) return;
-
-    const hasImage = message.attachments.some((attachment) =>
-      isImageAttachment(attachment)
-    );
-
-    if (!hasImage) return;
-
-    await message.pin().catch(() => {});
-    await unlockPaypalChannel(message);
-
-    if (SUPPORT_ROLE_ID && /^\d+$/.test(SUPPORT_ROLE_ID)) {
-      await channel.send({
-        content: `✅ PayPal proof received from ${message.author} <@&${SUPPORT_ROLE_ID}>`
-      });
-    } else {
-      await channel.send({
-        content: `✅ PayPal proof received from ${message.author}`
-      });
-    }
-  } catch (error) {
-    console.error("PayPal proof handler error:", error);
   }
 });
 
