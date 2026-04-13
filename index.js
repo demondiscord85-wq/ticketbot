@@ -128,7 +128,9 @@ function getPurchaseState(channelId) {
       paymentMethod: null,
       submitted: false,
       txAttempts: 0,
-      cryptoQuotes: {}
+      cryptoQuotes: {},
+      unlocked: false,
+      verifiedTxid: null
     });
   }
 
@@ -272,7 +274,8 @@ function buildPurchaseFlowEmbed(user) {
       "1. Choose what you want to buy",
       "2. Enter quantity",
       "3. Choose payment method",
-      "4. Press Done"
+      "4. Press Done",
+      "5. Submit a valid TXID to unlock the channel"
     ].join("\n"))
     .setThumbnail(LOGO_URL || null)
     .setFooter({ text: "Niro Market Purchase System", iconURL: LOGO_URL || undefined })
@@ -293,7 +296,8 @@ function buildPurchaseSummaryEmbed(user, state) {
     `**Product:** ${state.product ? `${state.product.label} — ${formatEuro(state.product.price)}` : "Not selected"}`,
     `**Quantity:** ${state.quantity ?? "Not selected"}`,
     `**Total:** ${state.total != null ? formatEuro(state.total) : "Not calculated"}`,
-    `**Payment Method:** ${state.paymentMethod ? state.paymentMethod.label : "Not selected"}`
+    `**Payment Method:** ${state.paymentMethod ? state.paymentMethod.label : "Not selected"}`,
+    `**Channel Status:** ${state.unlocked ? "Unlocked" : "Locked until payment verification"}`
   ];
 
   embed.setDescription(lines.join("\n"));
@@ -347,8 +351,22 @@ async function sendPurchaseFlow(channel, user) {
   const introEmbed = buildPurchaseFlowEmbed(user);
   const summaryEmbed = buildPurchaseSummaryEmbed(user, state);
 
+  const lockedEmbed = new EmbedBuilder()
+    .setColor(BRAND_COLOR)
+    .setAuthor({ name: "Niro Market", iconURL: LOGO_URL || undefined })
+    .setTitle("🔒 CHANNEL LOCKED")
+    .setDescription([
+      "**This purchase ticket is locked.**",
+      "",
+      "Complete the purchase flow, then submit a valid **BTC** or **LTC** TXID.",
+      "The channel will unlock only after the transaction is verified and the amount matches your order total."
+    ].join("\n"))
+    .setThumbnail(LOGO_URL || null)
+    .setFooter({ text: "Niro Market Payment Verification", iconURL: LOGO_URL || undefined })
+    .setTimestamp();
+
   await channel.send({
-    embeds: [introEmbed, summaryEmbed],
+    embeds: [introEmbed, summaryEmbed, lockedEmbed],
     components: buildPurchaseRows()
   });
 }
@@ -579,6 +597,38 @@ async function showTxidModal(interaction) {
   await interaction.showModal(modal);
 }
 
+async function unlockPurchaseChannel(interaction, txid) {
+  const state = getPurchaseState(interaction.channelId);
+
+  await interaction.channel.permissionOverwrites.edit(interaction.user.id, {
+    ViewChannel: true,
+    SendMessages: true,
+    ReadMessageHistory: true
+  });
+
+  state.unlocked = true;
+  state.verifiedTxid = txid;
+
+  const unlockedEmbed = new EmbedBuilder()
+    .setColor(BRAND_COLOR)
+    .setAuthor({ name: "Niro Market", iconURL: LOGO_URL || undefined })
+    .setTitle("🔓 CHANNEL UNLOCKED")
+    .setDescription([
+      `**${interaction.user.tag}** provided a valid transaction ID.`,
+      "",
+      `**TXID:** \`${txid}\``
+    ].join("\n"))
+    .setThumbnail(LOGO_URL || null)
+    .setFooter({ text: "Niro Market Payment Verification", iconURL: LOGO_URL || undefined })
+    .setTimestamp();
+
+  const unlockMessage = await interaction.channel.send({
+    embeds: [unlockedEmbed]
+  });
+
+  await unlockMessage.pin().catch(() => {});
+}
+
 async function handleTxidModal(interaction) {
   const state = getPurchaseState(interaction.channelId);
 
@@ -629,7 +679,7 @@ async function handleTxidModal(interaction) {
 
   if (verified) {
     await interaction.reply({
-      content: `✅ Payment verified successfully with **${verifiedCoin}**.`,
+      content: `✅ Payment verified successfully with **${verifiedCoin}**. The channel has been unlocked.`,
       ephemeral: true
     });
 
@@ -638,8 +688,10 @@ async function handleTxidModal(interaction) {
         ? `<@&${SUPPORT_ROLE_ID}>`
         : "@owners";
 
+    await unlockPurchaseChannel(interaction, txid);
+
     await interaction.channel.send({
-      content: `✅ Payment verified successfully. ${tagText}`
+      content: `✅ Payment verified successfully with **${verifiedCoin}**. ${tagText}`
     });
 
     return;
@@ -741,9 +793,11 @@ client.on("interactionCreate", async (interaction) => {
           id: interaction.user.id,
           allow: [
             PermissionsBitField.Flags.ViewChannel,
-            PermissionsBitField.Flags.SendMessages,
             PermissionsBitField.Flags.ReadMessageHistory
-          ]
+          ],
+          deny: selectedValue === "purchase"
+            ? [PermissionsBitField.Flags.SendMessages]
+            : []
         },
         {
           id: client.user.id,
@@ -756,6 +810,10 @@ client.on("interactionCreate", async (interaction) => {
           ]
         }
       ];
+
+      if (selectedValue !== "purchase") {
+        permissionOverwrites[1].allow.push(PermissionsBitField.Flags.SendMessages);
+      }
 
       if (SUPPORT_ROLE_ID && /^\d+$/.test(SUPPORT_ROLE_ID)) {
         permissionOverwrites.push({
@@ -788,7 +846,7 @@ client.on("interactionCreate", async (interaction) => {
           `**Reason:** ${selectedOption.label}`,
           "",
           selectedValue === "purchase"
-            ? "**Complete the order flow below.**"
+            ? "**Complete the order flow below. This channel will unlock only after a valid TXID is verified.**"
             : "**Please describe your issue and wait for a staff response.**"
         ].join("\n"))
         .setThumbnail(LOGO_URL || null)
