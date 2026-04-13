@@ -3,7 +3,7 @@ module.exports = {
 
   supportRoleId: "1480671765909733472",
 
-  ticketsCategoryId: null,
+  ticketsCategoryId: 1480671767453499498,
 
   brandColor: 0x67E6CD,
 
