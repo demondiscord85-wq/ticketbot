@@ -9,7 +9,7 @@
     "discord.js": "^14.16.3",
     "dotenv": "^16.4.5",
     "express": "^4.21.2",
-    "node-fetch": "^3.3.2"
-    "discord-html-transcripts": "^3.2.0"
+    "node-fetch": "^3.3.2",
+    "discord-html-transcripts": "^3.2.0",
   }
 }
