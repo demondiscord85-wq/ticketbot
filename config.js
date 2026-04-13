@@ -88,7 +88,7 @@ module.exports = {
   },
 
   paypal: {
-    email: "YOUR_PAYPAL_EMAIL_HERE"
+    email: "demonslatino@gmail.com"
   },
 
   stockSource: {
