@@ -57,7 +57,11 @@ app.listen(PORT, () => {
 
 // -------------------- DISCORD CLIENT --------------------
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds]
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent
+  ]
 });
 
 // -------------------- CONFIG --------------------
@@ -72,10 +76,11 @@ const TICKET_PANEL = config.ticketPanel || {
 
 const ticketOptions = config.ticketOptions || [];
 const purchaseCatalog = config.purchaseCatalog || [];
-const paymentMethods = config.paymentMethods || [];
+const paymentMethods = (config.paymentMethods || []).filter(
+  (method) => method.value !== "qr"
+);
 const cryptoWallets = config.cryptoWallets || {};
 const paypalConfig = config.paypal || {};
-const qrPayment = config.qrPayment || {};
 
 const purchaseStates = new Map();
 
@@ -135,6 +140,23 @@ function getPurchaseState(channelId) {
   }
 
   return purchaseStates.get(channelId);
+}
+
+function isImageAttachment(attachment) {
+  if (!attachment) return false;
+
+  const contentType = attachment.contentType || "";
+  if (contentType.startsWith("image/")) return true;
+
+  const name = (attachment.name || "").toLowerCase();
+  return [".png", ".jpg", ".jpeg", ".webp", ".gif"].some((ext) =>
+    name.endsWith(ext)
+  );
+}
+
+function getTicketOwnerIdFromTopic(topic = "") {
+  const match = topic.match(/ticket-owner:(\d+)/);
+  return match ? match[1] : null;
 }
 
 async function getCryptoQuote(coinId, totalEur) {
@@ -275,7 +297,7 @@ function buildPurchaseFlowEmbed(user) {
       "2. Enter quantity",
       "3. Choose payment method",
       "4. Press Done",
-      "5. Submit a valid TXID to unlock the channel"
+      "5. Complete the required payment verification to unlock the channel"
     ].join("\n"))
     .setThumbnail(LOGO_URL || null)
     .setFooter({ text: "Niro Market Purchase System", iconURL: LOGO_URL || undefined })
@@ -358,8 +380,11 @@ async function sendPurchaseFlow(channel, user) {
     .setDescription([
       "**This purchase ticket is locked.**",
       "",
-      "Complete the purchase flow, then submit a valid **BTC** or **LTC** TXID.",
-      "The channel will unlock only after the transaction is verified and the amount matches your order total."
+      "Crypto payments require a valid **BTC** or **LTC** TXID.",
+      "PayPal payments require a **payment screenshot**.",
+      "Something Else unlocks the channel automatically.",
+      "",
+      "The channel will unlock only after the required payment proof is verified."
     ].join("\n"))
     .setThumbnail(LOGO_URL || null)
     .setFooter({ text: "Niro Market Payment Verification", iconURL: LOGO_URL || undefined })
@@ -443,6 +468,18 @@ async function handlePurchasePayment(interaction) {
 
   if (!paymentMethod) {
     await interaction.reply({ content: "Invalid payment method selected.", ephemeral: true });
+    return;
+  }
+
+  if (
+    paymentMethod.value === "paypal" &&
+    state.total != null &&
+    Number(state.total) < 1
+  ) {
+    await interaction.reply({
+      content: "PayPal is only available for orders of at least **€1.00**.",
+      ephemeral: true
+    });
     return;
   }
 
@@ -539,24 +576,31 @@ async function handlePurchaseDone(interaction) {
 
     extraRows.push(new ActionRowBuilder().addComponents(txidButton));
   } else if (state.paymentMethod.value === "paypal") {
+    if (state.total < 1) {
+      state.paymentMethod = null;
+      state.submitted = false;
+
+      await interaction.reply({
+        content: "PayPal is only available for orders of at least **€1.00**. Please choose another payment method.",
+        ephemeral: true
+      });
+      return;
+    }
+
     detailsEmbed.setDescription([
       "Please send the payment through **PayPal Friends and Family**.",
       `**PayPal email:** ${paypalConfig.email || "NOT_SET"}`,
-      `**Amount:** ${formatEuro(state.total)}`
+      `**Amount:** ${formatEuro(state.total)}`,
+      "",
+      "**After sending the payment, upload a screenshot/photo of the transaction in this ticket.**",
+      "**The channel will unlock automatically after a valid payment screenshot is sent.**"
     ].join("\n"));
-  } else if (state.paymentMethod.value === "qr") {
-    const qrLines = [
-      qrPayment.text || "Scan one of the QR codes below and send the exact amount.",
-      `**Amount:** ${formatEuro(state.total)}`
-    ];
-
-    if (Array.isArray(qrPayment.imageUrls) && qrPayment.imageUrls.length) {
-      qrLines.push("", ...qrPayment.imageUrls.filter(Boolean));
-    }
-
-    detailsEmbed.setDescription(qrLines.join("\n"));
   } else if (state.paymentMethod.value === "something_else") {
-    detailsEmbed.setDescription("Wait for the owner to reply.");
+    detailsEmbed.setDescription([
+      "**You selected Something Else.**",
+      "",
+      "**This ticket will be unlocked automatically so you can continue with staff.**"
+    ].join("\n"));
   }
 
   const ownershipNotice = new EmbedBuilder()
@@ -579,6 +623,10 @@ async function handlePurchaseDone(interaction) {
     components: extraRows,
     ephemeral: false
   });
+
+  if (state.paymentMethod.value === "something_else") {
+    await unlockSomethingElseChannel(interaction);
+  }
 }
 
 async function showTxidModal(interaction) {
@@ -620,6 +668,68 @@ async function unlockPurchaseChannel(interaction, txid) {
     ].join("\n"))
     .setThumbnail(LOGO_URL || null)
     .setFooter({ text: "Niro Market Payment Verification", iconURL: LOGO_URL || undefined })
+    .setTimestamp();
+
+  const unlockMessage = await interaction.channel.send({
+    embeds: [unlockedEmbed]
+  });
+
+  await unlockMessage.pin().catch(() => {});
+}
+
+async function unlockPaypalChannel(message) {
+  const state = getPurchaseState(message.channel.id);
+
+  await message.channel.permissionOverwrites.edit(message.author.id, {
+    ViewChannel: true,
+    SendMessages: true,
+    ReadMessageHistory: true
+  });
+
+  state.unlocked = true;
+
+  const unlockedEmbed = new EmbedBuilder()
+    .setColor(BRAND_COLOR)
+    .setAuthor({ name: "Niro Market", iconURL: LOGO_URL || undefined })
+    .setTitle("🔓 CHANNEL UNLOCKED")
+    .setDescription([
+      `**${message.author.tag}** provided PayPal payment proof.`,
+      "",
+      "**Payment screenshot received and pinned successfully.**"
+    ].join("\n"))
+    .setThumbnail(LOGO_URL || null)
+    .setFooter({ text: "Niro Market Payment Verification", iconURL: LOGO_URL || undefined })
+    .setTimestamp();
+
+  const unlockMessage = await message.channel.send({
+    embeds: [unlockedEmbed]
+  });
+
+  await unlockMessage.pin().catch(() => {});
+}
+
+async function unlockSomethingElseChannel(interaction) {
+  const state = getPurchaseState(interaction.channelId);
+
+  await interaction.channel.permissionOverwrites.edit(interaction.user.id, {
+    ViewChannel: true,
+    SendMessages: true,
+    ReadMessageHistory: true
+  });
+
+  state.unlocked = true;
+
+  const unlockedEmbed = new EmbedBuilder()
+    .setColor(BRAND_COLOR)
+    .setAuthor({ name: "Niro Market", iconURL: LOGO_URL || undefined })
+    .setTitle("🔓 CHANNEL UNLOCKED")
+    .setDescription([
+      `**${interaction.user.tag}** selected **Something Else**.`,
+      "",
+      "**This channel has been unlocked automatically.**"
+    ].join("\n"))
+    .setThumbnail(LOGO_URL || null)
+    .setFooter({ text: "Niro Market Payment Flow", iconURL: LOGO_URL || undefined })
     .setTimestamp();
 
   const unlockMessage = await interaction.channel.send({
@@ -846,7 +956,7 @@ client.on("interactionCreate", async (interaction) => {
           `**Reason:** ${selectedOption.label}`,
           "",
           selectedValue === "purchase"
-            ? "**Complete the order flow below. This channel will unlock only after a valid TXID is verified.**"
+            ? "**Complete the order flow below. This channel will unlock only after the required payment proof is verified.**"
             : "**Please describe your issue and wait for a staff response.**"
         ].join("\n"))
         .setThumbnail(LOGO_URL || null)
@@ -954,6 +1064,50 @@ client.on("interactionCreate", async (interaction) => {
         ephemeral: true
       }).catch(() => {});
     }
+  }
+});
+
+// -------------------- PAYPAL IMAGE PROOF HANDLER --------------------
+client.on("messageCreate", async (message) => {
+  try {
+    if (message.author.bot) return;
+    if (!message.guild) return;
+
+    const channel = message.channel;
+    if (!channel?.topic) return;
+    if (!channel.topic.includes("ticket-owner:")) return;
+    if (!channel.topic.includes("ticket-type:purchase")) return;
+
+    const state = getPurchaseState(channel.id);
+    if (!state) return;
+    if (state.unlocked) return;
+    if (!state.submitted) return;
+    if (!state.paymentMethod || state.paymentMethod.value !== "paypal") return;
+    if (state.total == null || state.total < 1) return;
+
+    const ticketOwnerId = getTicketOwnerIdFromTopic(channel.topic);
+    if (!ticketOwnerId || message.author.id !== ticketOwnerId) return;
+
+    const hasImage = message.attachments.some((attachment) =>
+      isImageAttachment(attachment)
+    );
+
+    if (!hasImage) return;
+
+    await message.pin().catch(() => {});
+    await unlockPaypalChannel(message);
+
+    if (SUPPORT_ROLE_ID && /^\d+$/.test(SUPPORT_ROLE_ID)) {
+      await channel.send({
+        content: `✅ PayPal proof received from ${message.author} <@&${SUPPORT_ROLE_ID}>`
+      });
+    } else {
+      await channel.send({
+        content: `✅ PayPal proof received from ${message.author}`
+      });
+    }
+  } catch (error) {
+    console.error("PayPal proof handler error:", error);
   }
 });
 
