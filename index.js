@@ -18,6 +18,7 @@ const {
   TextInputBuilder,
   TextInputStyle
 } = require("discord.js");
+const discordTranscripts = require("discord-html-transcripts");
 
 const config = require("./config");
 
@@ -63,6 +64,7 @@ const SUPPORT_ROLE_ID = config.supportRoleId || "";
 const BRAND_COLOR = config.brandColor || 0x67E6CD;
 const LOGO_URL = config.logoUrl || "";
 const TICKETS_CATEGORY_ID = config.ticketsCategoryId || null;
+const LOGS_CHANNEL_ID = config.logsChannelId || "";
 const TICKET_PANEL = config.ticketPanel || {
   title: "Welcome to Niro Market",
   description: "Select a category below to open a ticket."
@@ -158,6 +160,92 @@ function isValidImageUrl(url) {
 
 function labelToValue(label) {
   return `item_${normalizeName(label)}`;
+}
+
+function getTicketOwnerIdFromTopic(topic = "") {
+  const match = topic.match(/ticket-owner:(\d+)/);
+  return match ? match[1] : null;
+}
+
+function getTicketTypeFromTopic(topic = "") {
+  const match = topic.match(/ticket-type:([^\s|]+)/);
+  return match ? match[1] : "unknown";
+}
+
+async function createTicketTranscript(channel) {
+  return await discordTranscripts.createTranscript(channel, {
+    limit: -1,
+    filename: `${channel.name}-transcript.html`,
+    saveImages: true,
+    poweredBy: false
+  });
+}
+
+async function sendTranscriptToLogs({
+  guild,
+  channel,
+  closedBy,
+  ownerUser,
+  transcriptAttachment
+}) {
+  if (!LOGS_CHANNEL_ID) return;
+
+  try {
+    const logsChannel = await guild.channels.fetch(LOGS_CHANNEL_ID);
+    if (!logsChannel || !logsChannel.isTextBased()) return;
+
+    const ticketType = getTicketTypeFromTopic(channel.topic || "");
+
+    const logEmbed = new EmbedBuilder()
+      .setColor(BRAND_COLOR)
+      .setAuthor({ name: "Niro Market", iconURL: LOGO_URL || undefined })
+      .setTitle("📁 Ticket Closed")
+      .setDescription([
+        `**Ticket:** ${channel.name}`,
+        `**Owner:** ${ownerUser ? ownerUser.tag : "Unknown User"}`,
+        `**Closed By:** ${closedBy.tag}`,
+        `**Type:** ${ticketType}`,
+        `**Channel ID:** ${channel.id}`
+      ].join("\n"))
+      .setFooter({
+        text: "Niro Market Transcript Logs",
+        iconURL: LOGO_URL || undefined
+      })
+      .setTimestamp();
+
+    await logsChannel.send({
+      embeds: [logEmbed],
+      files: [transcriptAttachment]
+    });
+  } catch (error) {
+    console.error("Failed to send transcript to logs:", error);
+  }
+}
+
+async function sendTranscriptToUserDM(ownerUser, transcriptAttachment) {
+  if (!ownerUser) return;
+
+  try {
+    const dmEmbed = new EmbedBuilder()
+      .setColor(BRAND_COLOR)
+      .setAuthor({ name: "Niro Market", iconURL: LOGO_URL || undefined })
+      .setTitle("Your Ticket Transcript")
+      .setDescription(
+        "We hope that you found what you were looking for. Here is your transcript if you ever need it."
+      )
+      .setFooter({
+        text: "Niro Market Support",
+        iconURL: LOGO_URL || undefined
+      })
+      .setTimestamp();
+
+    await ownerUser.send({
+      embeds: [dmEmbed],
+      files: [transcriptAttachment]
+    });
+  } catch (error) {
+    console.error("Failed to DM transcript to user:", error);
+  }
 }
 
 function mapStockNameToLabel(rawName) {
@@ -970,7 +1058,7 @@ async function unlockPurchaseChannel(interaction, txid) {
     .setFooter({ text: "Niro Market Payment Verification", iconURL: LOGO_URL || undefined })
     .setTimestamp();
 
-  const unlockMessage = await interaction.channel.send({
+    const unlockMessage = await interaction.channel.send({
     embeds: [unlockedEmbed]
   });
 
@@ -1374,9 +1462,31 @@ client.on("interactionCreate", async (interaction) => {
 
       if (interaction.customId === "close_ticket") {
         await interaction.reply({
-          content: "This ticket will close in 5 seconds.",
+          content: "Closing ticket and generating transcript...",
           ephemeral: true
         });
+
+        try {
+          const channel = interaction.channel;
+          const ownerId = getTicketOwnerIdFromTopic(channel.topic || "");
+          const ownerUser = ownerId
+            ? await client.users.fetch(ownerId).catch(() => null)
+            : null;
+
+          const transcriptAttachment = await createTicketTranscript(channel);
+
+          await sendTranscriptToLogs({
+            guild: interaction.guild,
+            channel,
+            closedBy: interaction.user,
+            ownerUser,
+            transcriptAttachment
+          });
+
+          await sendTranscriptToUserDM(ownerUser, transcriptAttachment);
+        } catch (error) {
+          console.error("Failed to generate/send transcript:", error);
+        }
 
         purchaseStates.delete(interaction.channelId);
 
@@ -1386,7 +1496,7 @@ client.on("interactionCreate", async (interaction) => {
           } catch (error) {
             console.error("Failed to delete ticket channel:", error);
           }
-        }, 5000);
+        }, 3000);
 
         return;
       }
