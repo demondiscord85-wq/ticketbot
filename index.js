@@ -342,8 +342,8 @@ function parseStockMessageText(text) {
       continue;
     }
 
-      const pcsMatch = line.match(/(.+?)\s*[:\-]\s*(\d+)\s*pcs\s*\[([0-9.,]+)€?\]/i);
-      if (pcsMatch) {
+    const pcsMatch = line.match(/(.+?)\s*[:\-]\s*(\d+)\s*pcs\s*\[([0-9.,]+)€?\]/i);
+    if (pcsMatch) {
       const rawName = pcsMatch[1].trim();
       const stock = Number(pcsMatch[2]);
       const price = parsePrice(pcsMatch[3]);
@@ -380,12 +380,15 @@ function buildFallbackCatalog() {
 
 async function fetchLiveStockCatalog(guild) {
   try {
-    const channel = await guild.channels.fetch(STOCK_CHANNEL_ID);
+    const channel = await guild.channels.fetch(STOCK_CHANNEL_ID, { force: true });
     if (!channel || !channel.isTextBased()) {
       throw new Error("Stock channel not found or is not text based.");
     }
 
-    const message = await channel.messages.fetch(STOCK_MESSAGE_ID);
+    const message = await channel.messages.fetch({
+      message: STOCK_MESSAGE_ID,
+      force: true
+    });
     if (!message) {
       throw new Error("Stock message not found.");
     }
@@ -1059,7 +1062,7 @@ async function unlockPurchaseChannel(interaction, txid) {
     .setFooter({ text: "Niro Market Payment Verification", iconURL: LOGO_URL || undefined })
     .setTimestamp();
 
-    const unlockMessage = await interaction.channel.send({
+  const unlockMessage = await interaction.channel.send({
     embeds: [unlockedEmbed]
   });
 
