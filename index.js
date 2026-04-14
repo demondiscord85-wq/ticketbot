@@ -1,6 +1,7 @@
 require("dotenv").config();
 
 const express = require("express");
+const fetch = (...args) => import("node-fetch").then(({ default: fetch }) => fetch(...args));
 const {
   Client,
   GatewayIntentBits,
@@ -16,7 +17,8 @@ const {
   SlashCommandBuilder,
   ModalBuilder,
   TextInputBuilder,
-  TextInputStyle
+  TextInputStyle,
+  MessageFlags
 } = require("discord.js");
 const discordTranscripts = require("discord-html-transcripts");
 
@@ -340,8 +342,8 @@ function parseStockMessageText(text) {
       continue;
     }
 
-    const pcsMatch = line.match(/^[›>xX+\-]?\s*(.+?)\s*[:\-]\s*(\d+)\s*pcs\s*\[([0-9.,]+)€?\]/i);
-    if (pcsMatch) {
+      const pcsMatch = line.match(/(.+?)\s*[:\-]\s*(\d+)\s*pcs\s*\[([0-9.,]+)€?\]/i);
+      if (pcsMatch) {
       const rawName = pcsMatch[1].trim();
       const stock = Number(pcsMatch[2]);
       const price = parsePrice(pcsMatch[3]);
@@ -684,14 +686,14 @@ async function handlePurchaseProduct(interaction) {
   const product = getLiveCatalogItem(interaction.channelId, interaction.values[0]);
 
   if (!product) {
-    await interaction.reply({ content: "Invalid product selected.", ephemeral: true });
+    await interaction.reply({ content: "Invalid product selected.", flags: MessageFlags.Ephemeral });
     return;
   }
 
   if (!product.inStock || product.stock <= 0) {
     await interaction.reply({
       content: `**${product.label}** is currently out of stock.`,
-      ephemeral: true
+      flags: MessageFlags.Ephemeral
     });
     return;
   }
@@ -704,7 +706,7 @@ async function handlePurchaseProduct(interaction) {
       state.total = null;
       await interaction.reply({
         content: `You selected **${product.label}**, but only **${product.stock}** item(s) are available. Please enter a lower quantity.`,
-        ephemeral: true
+        flags: MessageFlags.Ephemeral
       });
       return;
     }
@@ -714,7 +716,7 @@ async function handlePurchaseProduct(interaction) {
 
   await interaction.reply({
     content: `Selected product: **${product.label}** for **${formatEuro(product.price)}**.\nCurrent stock: **${product.stock}**`,
-    ephemeral: true
+    flags: MessageFlags.Ephemeral
   });
 }
 
@@ -744,7 +746,7 @@ async function handlePurchaseQuantityModal(interaction) {
   if (!Number.isInteger(quantity) || quantity <= 0) {
     await interaction.reply({
       content: "Please enter a valid positive whole number.",
-      ephemeral: true
+      flags: MessageFlags.Ephemeral
     });
     return;
   }
@@ -757,7 +759,7 @@ async function handlePurchaseQuantityModal(interaction) {
     if (!freshProduct || !freshProduct.inStock) {
       await interaction.reply({
         content: "This item is now out of stock. Please select another item.",
-        ephemeral: true
+        flags: MessageFlags.Ephemeral
       });
       return;
     }
@@ -767,7 +769,7 @@ async function handlePurchaseQuantityModal(interaction) {
     if (quantity > freshProduct.stock) {
       await interaction.reply({
         content: `We do not have that much stock.\nAvailable stock for **${freshProduct.label}**: **${freshProduct.stock}**`,
-        ephemeral: true
+        flags: MessageFlags.Ephemeral
       });
       return;
     }
@@ -780,7 +782,7 @@ async function handlePurchaseQuantityModal(interaction) {
 
   await interaction.reply({
     content: `Selected quantity: **${quantity}x**.`,
-    ephemeral: true
+    flags: MessageFlags.Ephemeral
   });
 }
 
@@ -789,14 +791,14 @@ async function handlePurchasePayment(interaction) {
   const paymentMethod = getPaymentMethod(interaction.values[0]);
 
   if (!paymentMethod) {
-    await interaction.reply({ content: "Invalid payment method selected.", ephemeral: true });
+    await interaction.reply({ content: "Invalid payment method selected.", flags: MessageFlags.Ephemeral });
     return;
   }
 
   if (!state.product || !state.quantity) {
     await interaction.reply({
       content: "Please select the product and quantity first.",
-      ephemeral: true
+      flags: MessageFlags.Ephemeral
     });
     return;
   }
@@ -807,7 +809,7 @@ async function handlePurchasePayment(interaction) {
   if (!freshProduct || !freshProduct.inStock) {
     await interaction.reply({
       content: "This item is now out of stock. Please select another item.",
-      ephemeral: true
+      flags: MessageFlags.Ephemeral
     });
     return;
   }
@@ -815,7 +817,7 @@ async function handlePurchasePayment(interaction) {
   if (state.quantity > freshProduct.stock) {
     await interaction.reply({
       content: `We do not have that much stock.\nAvailable stock for **${freshProduct.label}**: **${freshProduct.stock}**`,
-      ephemeral: true
+      flags: MessageFlags.Ephemeral
     });
     return;
   }
@@ -826,7 +828,7 @@ async function handlePurchasePayment(interaction) {
   if (paymentMethod.value === "paypal" && Number(state.total) < 1) {
     await interaction.reply({
       content: "PayPal is only available for orders of at least **€1.00**.",
-      ephemeral: true
+      flags: MessageFlags.Ephemeral
     });
     return;
   }
@@ -836,7 +838,7 @@ async function handlePurchasePayment(interaction) {
 
   await interaction.reply({
     content: `Payment method selected: **${paymentMethod.label}**.`,
-    ephemeral: true
+    flags: MessageFlags.Ephemeral
   });
 }
 
@@ -846,7 +848,7 @@ async function handlePurchaseDone(interaction) {
   if (!state.product || !state.quantity || !state.paymentMethod) {
     await interaction.reply({
       content: "Please select product, quantity, and payment method first.",
-      ephemeral: true
+      flags: MessageFlags.Ephemeral
     });
     return;
   }
@@ -858,7 +860,7 @@ async function handlePurchaseDone(interaction) {
   if (!freshProduct || !freshProduct.inStock) {
     await interaction.reply({
       content: "This item is now out of stock. Please select another item.",
-      ephemeral: true
+      flags: MessageFlags.Ephemeral
     });
     return;
   }
@@ -866,7 +868,7 @@ async function handlePurchaseDone(interaction) {
   if (state.quantity > freshProduct.stock) {
     await interaction.reply({
       content: `We do not have that much stock.\nAvailable stock for **${freshProduct.label}**: **${freshProduct.stock}**`,
-      ephemeral: true
+      flags: MessageFlags.Ephemeral
     });
     return;
   }
@@ -936,7 +938,7 @@ async function handlePurchaseDone(interaction) {
 
       await interaction.reply({
         content: "PayPal is only available for orders of at least **€1.00**. Please choose another payment method.",
-        ephemeral: true
+        flags: MessageFlags.Ephemeral
       });
       return;
     }
@@ -992,8 +994,7 @@ async function handlePurchaseDone(interaction) {
 
   await interaction.reply({
     embeds: [summaryEmbed, detailsEmbed, ownershipNotice],
-    components: extraRows,
-    ephemeral: false
+    components: extraRows
   });
 
   if (state.paymentMethod.value === "something_else") {
@@ -1135,7 +1136,7 @@ async function handleTxidModal(interaction) {
   if (!state.submitted || !state.paymentMethod || state.paymentMethod.value !== "crypto") {
     await interaction.reply({
       content: "You need to complete the crypto order first and press Done.",
-      ephemeral: true
+      flags: MessageFlags.Ephemeral
     });
     return;
   }
@@ -1145,7 +1146,7 @@ async function handleTxidModal(interaction) {
   if (!txid) {
     await interaction.reply({
       content: "Invalid TXID.",
-      ephemeral: true
+      flags: MessageFlags.Ephemeral
     });
     return;
   }
@@ -1180,7 +1181,7 @@ async function handleTxidModal(interaction) {
   if (verified) {
     await interaction.reply({
       content: `✅ Payment verified successfully with **${verifiedCoin}**. The channel has been unlocked.`,
-      ephemeral: true
+      flags: MessageFlags.Ephemeral
     });
 
     const tagText =
@@ -1203,7 +1204,7 @@ async function handleTxidModal(interaction) {
   if (state.txAttempts >= 3) {
     await interaction.reply({
       content: "❌ Wrong TXID 3 times. This ticket will now close.",
-      ephemeral: true
+      flags: MessageFlags.Ephemeral
     });
 
     setTimeout(async () => {
@@ -1220,7 +1221,7 @@ async function handleTxidModal(interaction) {
 
   await interaction.reply({
     content: `❌ Payment could not be verified. You have **${attemptsLeft}** attempt${attemptsLeft === 1 ? "" : "s"} left.`,
-    ephemeral: true
+    flags: MessageFlags.Ephemeral
   });
 }
 
@@ -1230,7 +1231,7 @@ async function handleScreenshotModal(interaction) {
   if (!state.submitted || !state.paymentMethod || state.paymentMethod.value !== "paypal") {
     await interaction.reply({
       content: "You need to complete the PayPal order first and press Done.",
-      ephemeral: true
+      flags: MessageFlags.Ephemeral
     });
     return;
   }
@@ -1238,7 +1239,7 @@ async function handleScreenshotModal(interaction) {
   if (state.total == null || state.total < 1) {
     await interaction.reply({
       content: "PayPal is only available for orders of at least **€1.00**.",
-      ephemeral: true
+      flags: MessageFlags.Ephemeral
     });
     return;
   }
@@ -1248,14 +1249,14 @@ async function handleScreenshotModal(interaction) {
   if (!isValidImageUrl(imageUrl)) {
     await interaction.reply({
       content: "Please submit a valid image URL.",
-      ephemeral: true
+      flags: MessageFlags.Ephemeral
     });
     return;
   }
 
   await interaction.reply({
     content: "✅ PayPal screenshot received. The channel has been unlocked.",
-    ephemeral: true
+    flags: MessageFlags.Ephemeral
   });
 
   await unlockPaypalChannelFromLink(interaction, imageUrl);
@@ -1304,14 +1305,14 @@ client.on("interactionCreate", async (interaction) => {
 
       await interaction.reply({
         content: "Ticket panel sent.",
-        ephemeral: true
+        flags: MessageFlags.Ephemeral
       });
 
       return;
     }
 
     if (interaction.isStringSelectMenu() && interaction.customId === "ticket_select") {
-      await interaction.deferReply({ ephemeral: true });
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
       const selectedValue = interaction.values[0];
       const selectedOption = getTicketOption(selectedValue);
@@ -1463,7 +1464,7 @@ client.on("interactionCreate", async (interaction) => {
       if (interaction.customId === "close_ticket") {
         await interaction.reply({
           content: "Closing ticket and generating transcript...",
-          ephemeral: true
+          flags: MessageFlags.Ephemeral
         });
 
         try {
@@ -1524,12 +1525,12 @@ client.on("interactionCreate", async (interaction) => {
     if (interaction.replied || interaction.deferred) {
       await interaction.followUp({
         content: "An error occurred while processing this action.",
-        ephemeral: true
+        flags: MessageFlags.Ephemeral
       }).catch(() => {});
     } else {
       await interaction.reply({
         content: "An error occurred while processing this action.",
-        ephemeral: true
+        flags: MessageFlags.Ephemeral
       }).catch(() => {});
     }
   }
