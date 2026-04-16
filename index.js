@@ -63,6 +63,7 @@ const client = new Client({
 
 // -------------------- CONFIG --------------------
 const SUPPORT_ROLE_ID = config.supportRoleId || "";
+const NOTIFY_ROLE_ID = "1480671765909733472";
 const BRAND_COLOR = config.brandColor || 0x67E6CD;
 const LOGO_URL = config.logoUrl || "";
 const TICKETS_CATEGORY_ID = config.ticketsCategoryId || null;
@@ -247,6 +248,39 @@ async function sendTranscriptToUserDM(ownerUser, transcriptAttachment) {
     });
   } catch (error) {
     console.error("Failed to DM transcript to user:", error);
+  }
+}
+
+async function sendTicketUpdateDM(ownerUser, guild, channel, staffUser) {
+  if (!ownerUser) return false;
+
+  try {
+    const updateEmbed = new EmbedBuilder()
+      .setColor(BRAND_COLOR)
+      .setAuthor({ name: "Niro Market", iconURL: LOGO_URL || undefined })
+      .setTitle("🔔 Ticket Update")
+      .setDescription([
+        `Hello ${ownerUser},`,
+        "",
+        "There has been a new update on your ticket.",
+        "Please check your ticket when you can to see the latest response from our staff team.",
+        "",
+        `**Server:** ${guild.name}`,
+        `**Ticket:** #${channel.name}`,
+        `**Updated By:** ${staffUser.tag}`
+      ].join("\n"))
+      .setThumbnail(LOGO_URL || null)
+      .setFooter({
+        text: "Niro Market Support",
+        iconURL: LOGO_URL || undefined
+      })
+      .setTimestamp();
+
+    await ownerUser.send({ embeds: [updateEmbed] });
+    return true;
+  } catch (error) {
+    console.error("Failed to send ticket update DM:", error);
+    return false;
   }
 }
 
@@ -1403,13 +1437,19 @@ client.on("interactionCreate", async (interaction) => {
         .setFooter({ text: "Niro Market Ticket System", iconURL: LOGO_URL || undefined })
         .setTimestamp();
 
+      const notifyButton = new ButtonBuilder()
+        .setCustomId("notify_ticket_owner")
+        .setLabel("Notify")
+        .setEmoji("🔔")
+        .setStyle(ButtonStyle.Secondary);
+
       const closeButton = new ButtonBuilder()
         .setCustomId("close_ticket")
         .setLabel("Close Ticket")
         .setEmoji("🔒")
         .setStyle(ButtonStyle.Danger);
 
-      const buttons = new ActionRowBuilder().addComponents(closeButton);
+      const buttons = new ActionRowBuilder().addComponents(notifyButton, closeButton);
 
       const pingText =
         SUPPORT_ROLE_ID && /^\d+$/.test(SUPPORT_ROLE_ID)
@@ -1461,6 +1501,52 @@ client.on("interactionCreate", async (interaction) => {
 
       if (interaction.customId === "purchase_submit_screenshot") {
         await showScreenshotModal(interaction);
+        return;
+      }
+
+      if (interaction.customId === "notify_ticket_owner") {
+        const memberRoles = interaction.member?.roles?.cache;
+        const canNotify = Boolean(
+          memberRoles &&
+            NOTIFY_ROLE_ID &&
+            memberRoles.has(NOTIFY_ROLE_ID)
+        );
+
+        if (!canNotify) {
+          await interaction.reply({
+            content: "You do not have permission to use this button.",
+            flags: MessageFlags.Ephemeral
+          });
+          return;
+        }
+
+        const channel = interaction.channel;
+        const ownerId = getTicketOwnerIdFromTopic(channel.topic || "");
+        const ownerUser = ownerId
+          ? await client.users.fetch(ownerId).catch(() => null)
+          : null;
+
+        if (!ownerUser) {
+          await interaction.reply({
+            content: "I could not find the ticket owner for this ticket.",
+            flags: MessageFlags.Ephemeral
+          });
+          return;
+        }
+
+        const sent = await sendTicketUpdateDM(
+          ownerUser,
+          interaction.guild,
+          channel,
+          interaction.user
+        );
+
+        await interaction.reply({
+          content: sent
+            ? `Notification sent to ${ownerUser.tag}.`
+            : "I could not send the DM. The user may have DMs disabled.",
+          flags: MessageFlags.Ephemeral
+        });
         return;
       }
 
