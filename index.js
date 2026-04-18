@@ -175,6 +175,164 @@ function getTicketTypeFromTopic(topic = "") {
   return match ? match[1] : "unknown";
 }
 
+
+function buildIssueDetailsModal(ticketType) {
+  const isReplacement = ticketType === "replacement";
+  const modal = new ModalBuilder()
+    .setCustomId(`ticket_issue_modal:${ticketType}`)
+    .setTitle("Create Ticket");
+
+  const orderIdInput = new TextInputBuilder()
+    .setCustomId("ticket_order_id")
+    .setLabel("What is your Order ID?")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setPlaceholder("Enter the order ID");
+
+  const issueInput = new TextInputBuilder()
+    .setCustomId("ticket_issue")
+    .setLabel("What is your issue?")
+    .setStyle(TextInputStyle.Paragraph)
+    .setRequired(true)
+    .setPlaceholder("Please describe your issue in detail.");
+
+  modal.addComponents(
+    new ActionRowBuilder().addComponents(orderIdInput),
+    new ActionRowBuilder().addComponents(issueInput)
+  );
+
+  if (isReplacement) {
+    const accountInput = new TextInputBuilder()
+      .setCustomId("ticket_account")
+      .setLabel("What account has the issue?")
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true)
+      .setPlaceholder("Enter the account with the problem");
+
+    modal.addComponents(new ActionRowBuilder().addComponents(accountInput));
+  }
+
+  return modal;
+}
+
+async function createStandardTicket({ interaction, selectedOption, selectedValue, collectedDetails = null }) {
+  const permissionOverwrites = [
+    {
+      id: interaction.guild.roles.everyone.id,
+      deny: [PermissionsBitField.Flags.ViewChannel]
+    },
+    {
+      id: interaction.user.id,
+      allow: [
+        PermissionsBitField.Flags.ViewChannel,
+        PermissionsBitField.Flags.ReadMessageHistory
+      ],
+      deny: selectedValue === "purchase"
+        ? [PermissionsBitField.Flags.SendMessages]
+        : []
+    },
+    {
+      id: client.user.id,
+      allow: [
+        PermissionsBitField.Flags.ViewChannel,
+        PermissionsBitField.Flags.SendMessages,
+        PermissionsBitField.Flags.ReadMessageHistory,
+        PermissionsBitField.Flags.ManageChannels,
+        PermissionsBitField.Flags.ManageMessages
+      ]
+    }
+  ];
+
+  if (selectedValue !== "purchase") {
+    permissionOverwrites[1].allow.push(PermissionsBitField.Flags.SendMessages);
+  }
+
+  if (SUPPORT_ROLE_ID && /^\d+$/.test(SUPPORT_ROLE_ID)) {
+    permissionOverwrites.push({
+      id: SUPPORT_ROLE_ID,
+      allow: [
+        PermissionsBitField.Flags.ViewChannel,
+        PermissionsBitField.Flags.SendMessages,
+        PermissionsBitField.Flags.ReadMessageHistory,
+        PermissionsBitField.Flags.ManageMessages
+      ]
+    });
+  }
+
+  const ticketChannel = await interaction.guild.channels.create({
+    name: `ticket-${normalizeName(selectedOption.label)}-${normalizeName(interaction.user.username)}`,
+    type: ChannelType.GuildText,
+    parent: TICKETS_CATEGORY_ID || null,
+    topic: `ticket-owner:${interaction.user.id} | ticket-type:${selectedValue}`,
+    permissionOverwrites
+  });
+
+  const ticketEmbed = new EmbedBuilder()
+    .setColor(BRAND_COLOR)
+    .setAuthor({ name: "Niro Market", iconURL: LOGO_URL || undefined })
+    .setTitle(`${selectedOption.emoji || "🎫"} ${selectedOption.label} Ticket`)
+    .setDescription([
+      "**Thank you for contacting Niro Market Support.**",
+      "",
+      `**Opened By:** ${interaction.user.tag}`,
+      `**Reason:** ${selectedOption.label}`,
+      "",
+      selectedValue === "purchase"
+        ? "**Complete the order flow below. This channel will unlock only after the required payment proof is verified.**"
+        : "**Please describe your issue and wait for a staff response.**"
+    ].join("\n"))
+    .setThumbnail(LOGO_URL || null)
+    .setFooter({ text: "Niro Market Ticket System", iconURL: LOGO_URL || undefined })
+    .setTimestamp();
+
+  const notifyButton = new ButtonBuilder()
+    .setCustomId("notify_ticket_owner")
+    .setLabel("Notify")
+    .setEmoji("🔔")
+    .setStyle(ButtonStyle.Secondary);
+
+  const closeButton = new ButtonBuilder()
+    .setCustomId("close_ticket")
+    .setLabel("Close Ticket")
+    .setEmoji("🔒")
+    .setStyle(ButtonStyle.Danger);
+
+  const buttons = new ActionRowBuilder().addComponents(notifyButton, closeButton);
+
+  const pingText =
+    SUPPORT_ROLE_ID && /^\d+$/.test(SUPPORT_ROLE_ID)
+      ? `<@&${SUPPORT_ROLE_ID}> ${interaction.user}`
+      : `${interaction.user}`;
+
+  await ticketChannel.send({
+    content: pingText,
+    embeds: [ticketEmbed],
+    components: [buttons]
+  });
+
+  if (collectedDetails) {
+    const detailsLines = [
+      "## Ticket details",
+      `**Order ID:** ${collectedDetails.orderId}`,
+      `**Issue:** ${collectedDetails.issue}`
+    ];
+
+    if (collectedDetails.account) {
+      detailsLines.push(`**Account:** ${collectedDetails.account}`);
+    }
+
+    await ticketChannel.send({
+      content: detailsLines.join("\n")
+    });
+  }
+
+  if (selectedValue === "purchase") {
+    await sendPurchaseFlow(ticketChannel, interaction.user);
+  }
+
+  return ticketChannel;
+}
+
 async function createTicketTranscript(channel) {
   return await discordTranscripts.createTranscript(channel, {
     limit: -1,
@@ -1349,122 +1507,35 @@ client.on("interactionCreate", async (interaction) => {
     }
 
     if (interaction.isStringSelectMenu() && interaction.customId === "ticket_select") {
-      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-
       const selectedValue = interaction.values[0];
       const selectedOption = getTicketOption(selectedValue);
 
       if (!selectedOption) {
-        await interaction.editReply({ content: "Invalid ticket option." });
+        await interaction.reply({ content: "Invalid ticket option.", flags: MessageFlags.Ephemeral });
         return;
       }
 
       const existingChannel = findOpenTicketByUser(interaction.guild, interaction.user.id);
 
       if (existingChannel) {
-        await interaction.editReply({
-          content: `You already have an open ticket: ${existingChannel}`
+        await interaction.reply({
+          content: `You already have an open ticket: ${existingChannel}`,
+          flags: MessageFlags.Ephemeral
         });
         return;
       }
 
-      const permissionOverwrites = [
-        {
-          id: interaction.guild.roles.everyone.id,
-          deny: [PermissionsBitField.Flags.ViewChannel]
-        },
-        {
-          id: interaction.user.id,
-          allow: [
-            PermissionsBitField.Flags.ViewChannel,
-            PermissionsBitField.Flags.ReadMessageHistory
-          ],
-          deny: selectedValue === "purchase"
-            ? [PermissionsBitField.Flags.SendMessages]
-            : []
-        },
-        {
-          id: client.user.id,
-          allow: [
-            PermissionsBitField.Flags.ViewChannel,
-            PermissionsBitField.Flags.SendMessages,
-            PermissionsBitField.Flags.ReadMessageHistory,
-            PermissionsBitField.Flags.ManageChannels,
-            PermissionsBitField.Flags.ManageMessages
-          ]
-        }
-      ];
-
-      if (selectedValue !== "purchase") {
-        permissionOverwrites[1].allow.push(PermissionsBitField.Flags.SendMessages);
+      if (["support", "replacement"].includes(selectedValue)) {
+        await interaction.showModal(buildIssueDetailsModal(selectedValue));
+        return;
       }
 
-      if (SUPPORT_ROLE_ID && /^\d+$/.test(SUPPORT_ROLE_ID)) {
-        permissionOverwrites.push({
-          id: SUPPORT_ROLE_ID,
-          allow: [
-            PermissionsBitField.Flags.ViewChannel,
-            PermissionsBitField.Flags.SendMessages,
-            PermissionsBitField.Flags.ReadMessageHistory,
-            PermissionsBitField.Flags.ManageMessages
-          ]
-        });
-      }
-
-      const ticketChannel = await interaction.guild.channels.create({
-        name: `ticket-${normalizeName(selectedOption.label)}-${normalizeName(interaction.user.username)}`,
-        type: ChannelType.GuildText,
-        parent: TICKETS_CATEGORY_ID || null,
-        topic: `ticket-owner:${interaction.user.id} | ticket-type:${selectedValue}`,
-        permissionOverwrites
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+      const ticketChannel = await createStandardTicket({
+        interaction,
+        selectedOption,
+        selectedValue
       });
-
-      const ticketEmbed = new EmbedBuilder()
-        .setColor(BRAND_COLOR)
-        .setAuthor({ name: "Niro Market", iconURL: LOGO_URL || undefined })
-        .setTitle(`${selectedOption.emoji || "🎫"} ${selectedOption.label} Ticket`)
-        .setDescription([
-          "**Thank you for contacting Niro Market Support.**",
-          "",
-          `**Opened By:** ${interaction.user.tag}`,
-          `**Reason:** ${selectedOption.label}`,
-          "",
-          selectedValue === "purchase"
-            ? "**Complete the order flow below. This channel will unlock only after the required payment proof is verified.**"
-            : "**Please describe your issue and wait for a staff response.**"
-        ].join("\n"))
-        .setThumbnail(LOGO_URL || null)
-        .setFooter({ text: "Niro Market Ticket System", iconURL: LOGO_URL || undefined })
-        .setTimestamp();
-
-      const notifyButton = new ButtonBuilder()
-        .setCustomId("notify_ticket_owner")
-        .setLabel("Notify")
-        .setEmoji("🔔")
-        .setStyle(ButtonStyle.Secondary);
-
-      const closeButton = new ButtonBuilder()
-        .setCustomId("close_ticket")
-        .setLabel("Close Ticket")
-        .setEmoji("🔒")
-        .setStyle(ButtonStyle.Danger);
-
-      const buttons = new ActionRowBuilder().addComponents(notifyButton, closeButton);
-
-      const pingText =
-        SUPPORT_ROLE_ID && /^\d+$/.test(SUPPORT_ROLE_ID)
-          ? `<@&${SUPPORT_ROLE_ID}> ${interaction.user}`
-          : `${interaction.user}`;
-
-      await ticketChannel.send({
-        content: pingText,
-        embeds: [ticketEmbed],
-        components: [buttons]
-      });
-
-      if (selectedValue === "purchase") {
-        await sendPurchaseFlow(ticketChannel, interaction.user);
-      }
 
       await interaction.editReply({
         content: `Your ticket has been created: ${ticketChannel}`
@@ -1593,6 +1664,50 @@ client.on("interactionCreate", async (interaction) => {
     }
 
     if (interaction.isModalSubmit()) {
+      if (interaction.customId.startsWith("ticket_issue_modal:")) {
+        const selectedValue = interaction.customId.split(":")[1];
+        const selectedOption = getTicketOption(selectedValue);
+
+        if (!selectedOption) {
+          await interaction.reply({
+            content: "Invalid ticket option.",
+            flags: MessageFlags.Ephemeral
+          });
+          return;
+        }
+
+        const existingChannel = findOpenTicketByUser(interaction.guild, interaction.user.id);
+
+        if (existingChannel) {
+          await interaction.reply({
+            content: `You already have an open ticket: ${existingChannel}`,
+            flags: MessageFlags.Ephemeral
+          });
+          return;
+        }
+
+        const collectedDetails = {
+          orderId: interaction.fields.getTextInputValue("ticket_order_id").trim(),
+          issue: interaction.fields.getTextInputValue("ticket_issue").trim(),
+          account: selectedValue === "replacement"
+            ? interaction.fields.getTextInputValue("ticket_account").trim()
+            : null
+        };
+
+        const ticketChannel = await createStandardTicket({
+          interaction,
+          selectedOption,
+          selectedValue,
+          collectedDetails
+        });
+
+        await interaction.reply({
+          content: `Your ticket has been created: ${ticketChannel}`,
+          flags: MessageFlags.Ephemeral
+        });
+        return;
+      }
+
       if (interaction.customId === "purchase_quantity_modal") {
         await handlePurchaseQuantityModal(interaction);
         return;
