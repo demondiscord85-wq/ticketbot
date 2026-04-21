@@ -5,6 +5,7 @@ const fetch = (...args) => import("node-fetch").then(({ default: fetch }) => fet
 const {
   Client,
   GatewayIntentBits,
+  AttachmentBuilder,
   PermissionsBitField,
   ChannelType,
   EmbedBuilder,
@@ -21,6 +22,9 @@ const {
   MessageFlags
 } = require("discord.js");
 const discordTranscripts = require("discord-html-transcripts");
+
+const fs = require("fs");
+const path = require("path");
 
 const config = require("./config");
 
@@ -58,7 +62,11 @@ app.listen(PORT, () => {
 
 // -------------------- DISCORD CLIENT --------------------
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds]
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent
+  ]
 });
 
 // -------------------- CONFIG --------------------
@@ -85,6 +93,34 @@ const STOCK_CHANNEL_ID = config.stockSource?.channelId || "1484837636635099146";
 const STOCK_MESSAGE_ID = config.stockSource?.messageId || "1485263280120397925";
 
 const purchaseStates = new Map();
+const USER_PAYMENT_ROLE_ID = "1480671765909733472";
+const USER_PAYMENT_STORE_PATH = path.join(__dirname, "user-payment-methods.json");
+
+function loadUserPaymentStore() {
+  try {
+    if (!fs.existsSync(USER_PAYMENT_STORE_PATH)) {
+      fs.writeFileSync(USER_PAYMENT_STORE_PATH, JSON.stringify({}, null, 2));
+      return {};
+    }
+
+    const raw = fs.readFileSync(USER_PAYMENT_STORE_PATH, "utf8");
+    const parsed = JSON.parse(raw || "{}");
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch (error) {
+    console.error("Failed to load user payment store:", error);
+    return {};
+  }
+}
+
+const userPaymentStore = loadUserPaymentStore();
+
+function saveUserPaymentStore() {
+  try {
+    fs.writeFileSync(USER_PAYMENT_STORE_PATH, JSON.stringify(userPaymentStore, null, 2));
+  } catch (error) {
+    console.error("Failed to save user payment store:", error);
+  }
+}
 
 const commands = [
   new SlashCommandBuilder()
@@ -173,6 +209,138 @@ function getTicketOwnerIdFromTopic(topic = "") {
 function getTicketTypeFromTopic(topic = "") {
   const match = topic.match(/ticket-type:([^\s|]+)/);
   return match ? match[1] : "unknown";
+}
+
+function memberHasUserPaymentRole(member) {
+  return Boolean(member?.roles?.cache?.has(USER_PAYMENT_ROLE_ID));
+}
+
+function getUserPaymentProfile(userId) {
+  if (!userPaymentStore[userId]) {
+    userPaymentStore[userId] = {
+      ltc: null,
+      paypal: null
+    };
+  }
+
+  return userPaymentStore[userId];
+}
+
+function setUserPaymentValue(userId, key, value) {
+  const profile = getUserPaymentProfile(userId);
+  profile[key] = value;
+  saveUserPaymentStore();
+  return profile;
+}
+
+function buildUserPaymentEmbed({ user, type, value }) {
+  const prettyType = type === "ltc" ? "Litecoin" : "PayPal";
+  const fieldLabel = type === "ltc" ? "Litecoin Address" : "PayPal Email";
+  const descriptionLines = [
+    `**User:**`,
+    `${user}`,
+    "",
+    `**${fieldLabel}:**`,
+    `\`${value}\``
+  ];
+
+  if (type === "paypal") {
+    descriptionLines.push("", "**ONLY FRIEND AND FAMILY**");
+  }
+
+  return new EmbedBuilder()
+    .setColor(BRAND_COLOR)
+    .setAuthor({ name: "Marketplace", iconURL: LOGO_URL || undefined })
+    .setTitle(`${prettyType} Information`)
+    .setDescription(descriptionLines.join("\n"))
+    .setThumbnail(LOGO_URL || null)
+    .setFooter({ text: "Niro market", iconURL: LOGO_URL || undefined });
+}
+
+function resolvePaymentTargetUser(message) {
+  const mentionedUser = message.mentions.users.first();
+  if (mentionedUser) return mentionedUser;
+
+  const parts = message.content.trim().split(/\s+/);
+  if (parts.length < 2) return message.author;
+
+  const potentialId = parts[1].replace(/[^0-9]/g, "");
+  if (potentialId && /^\d{17,20}$/.test(potentialId)) {
+    return message.client.users.cache.get(potentialId) || message.author;
+  }
+
+  return message.author;
+}
+
+async function handleUserPaymentCommand(message) {
+  if (!message.guild || message.author.bot) return false;
+
+  const content = message.content.trim();
+  if (!content.startsWith("!")) return false;
+
+  const parts = content.split(/\s+/);
+  const command = parts[0].toLowerCase();
+  const value = parts.slice(1).join(" ").trim();
+  const allowedCommands = ["!setltc", "!setpp", "!ltc", "!pp"];
+
+  if (!allowedCommands.includes(command)) return false;
+
+  const member = message.member || (await message.guild.members.fetch(message.author.id).catch(() => null));
+  if (!memberHasUserPaymentRole(member)) {
+    await message.reply("You do not have permission to use this command.");
+    return true;
+  }
+
+  if (command === "!setltc") {
+    if (!value) {
+      await message.reply("Usage: `!setltc your_ltc_address`");
+      return true;
+    }
+
+    setUserPaymentValue(message.author.id, "ltc", value);
+    await message.reply("Your Litecoin address has been saved.");
+    return true;
+  }
+
+  if (command === "!setpp") {
+    if (!value) {
+      await message.reply("Usage: `!setpp your_paypal_email`");
+      return true;
+    }
+
+    setUserPaymentValue(message.author.id, "paypal", value);
+    await message.reply("Your PayPal email has been saved.");
+    return true;
+  }
+
+  const targetUser = resolvePaymentTargetUser(message);
+  const profile = getUserPaymentProfile(targetUser.id);
+
+  if (command === "!ltc") {
+    if (!profile.ltc) {
+      await message.reply(targetUser.id === message.author.id
+        ? "You have not set a Litecoin address yet. Use `!setltc your_address` first."
+        : `${targetUser} has not set a Litecoin address yet.`);
+      return true;
+    }
+
+    await message.channel.send({ embeds: [buildUserPaymentEmbed({ user: targetUser, type: "ltc", value: profile.ltc })] });
+    return true;
+  }
+
+  if (command === "!pp") {
+    if (!profile.paypal) {
+      await message.reply(targetUser.id === message.author.id
+        ? "You have not set a PayPal email yet. Use `!setpp your_email` first."
+        : `${targetUser} has not set a PayPal email yet.`);
+      return true;
+    }
+
+    await message.channel.send({ embeds: [buildUserPaymentEmbed({ user: targetUser, type: "paypal", value: profile.paypal })] });
+    return true;
+  }
+
+  return false;
 }
 
 
@@ -1737,6 +1905,14 @@ client.on("interactionCreate", async (interaction) => {
         flags: MessageFlags.Ephemeral
       }).catch(() => {});
     }
+  }
+});
+
+client.on("messageCreate", async (message) => {
+  try {
+    await handleUserPaymentCommand(message);
+  } catch (error) {
+    console.error("Message command error:", error);
   }
 });
 
